@@ -1,0 +1,27 @@
+# App: one image, two binaries. Tests: separate golang image + bind mount (profile `test`).
+services:
+  relay:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: relay:latest
+    container_name: relay
+    ports:
+      - "8080:8080"
+    command: ["/app/relay"]
+
+  relay-mock:
+    image: relay:latest
+    container_name: relay-mock
+    ports:
+      - "8081:8081"
+    command: ["/app/relay-mock"]
+
+  test:
+    image: golang:1.22-alpine
+    working_dir: /src
+    volumes:
+      - .:/src
+    command: ["go", "test", "./...", "-count=1"]
+    profiles:
+      - test

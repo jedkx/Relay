@@ -1,0 +1,45 @@
+{
+  "info": {
+    "_postman_id": "relay-local",
+    "name": "relay",
+    "description": "relayBase = API from your machine. deliveryTarget = URL the relay *worker* calls: use http://relay-mock:8081/receive with Docker Compose; use http://127.0.0.1:8081/receive when both processes run on the host (go run).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "relayBase", "value": "http://127.0.0.1:8080" },
+    { "key": "mockBase", "value": "http://127.0.0.1:8081" },
+    { "key": "deliveryTarget", "value": "http://relay-mock:8081/receive" }
+  ],
+  "item": [
+    {
+      "name": "GET /health (relay)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{relayBase}}/health"
+      }
+    },
+    {
+      "name": "GET /health (mock)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{mockBase}}/health"
+      }
+    },
+    {
+      "name": "POST /webhooks",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"target_url\": \"{{deliveryTarget}}\",\n  \"event_type\": \"demo.event\",\n  \"payload\": { \"hello\": \"world\" }\n}"
+        },
+        "url": "{{relayBase}}/webhooks"
+      }
+    }
+  ]
+}
