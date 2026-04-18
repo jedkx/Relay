@@ -1,6 +1,7 @@
 package delivery
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -8,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"relay/internal/queue"
-	"relay/internal/webhook"
+	"relay/internal/model"
+	"relay/internal/store"
 )
 
 func TestWorker_DeliversPOSTToTarget(t *testing.T) {
@@ -29,16 +30,19 @@ func TestWorker_DeliversPOSTToTarget(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	q := queue.NewMemoryQueue(10)
-	Start(q)
+	ctx := context.Background()
+	st := store.NewMemory()
+	Start(ctx, st)
 
-	ev := &webhook.Event{
+	ev := &model.Event{
 		ID:        "evt-1",
 		TargetURL: ts.URL,
 		EventType: "test.event",
 		Payload:   map[string]any{"n": 1},
 	}
-	q.Enqueue(ev)
+	if err := st.InsertPending(ctx, ev); err != nil {
+		t.Fatal(err)
+	}
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {

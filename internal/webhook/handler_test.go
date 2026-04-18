@@ -7,15 +7,15 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"relay/internal/queue"
+	"relay/internal/store"
 	"relay/internal/webhook"
 )
 
 func TestHandler_Create_ValidRequest_Returns202AndEnqueuesEvent(t *testing.T) {
 	t.Parallel()
 
-	q := queue.NewMemoryQueue(10)
-	h := webhook.NewHandler(q)
+	st := store.NewMemory()
+	h := webhook.NewHandler(st)
 
 	body := map[string]any{
 		"target_url": "https://example.com/hooks/1",
@@ -51,10 +51,12 @@ func TestHandler_Create_ValidRequest_Returns202AndEnqueuesEvent(t *testing.T) {
 		t.Fatalf("status field = %q, want accepted", got.Status)
 	}
 
-	item := q.Dequeue()
-	ev, ok := item.(*webhook.Event)
+	ev, status, ok := st.Get(got.ID)
 	if !ok {
-		t.Fatalf("dequeued type = %T, want *webhook.Event", item)
+		t.Fatal("expected event in store")
+	}
+	if status != "pending" {
+		t.Fatalf("status = %q, want pending", status)
 	}
 	if ev.ID != got.ID {
 		t.Fatalf("event id = %q, want %q", ev.ID, got.ID)
@@ -70,8 +72,8 @@ func TestHandler_Create_ValidRequest_Returns202AndEnqueuesEvent(t *testing.T) {
 func TestHandler_Create_InvalidJSON_Returns400(t *testing.T) {
 	t.Parallel()
 
-	q := queue.NewMemoryQueue(10)
-	h := webhook.NewHandler(q)
+	st := store.NewMemory()
+	h := webhook.NewHandler(st)
 
 	req := httptest.NewRequest(http.MethodPost, "/webhooks", bytes.NewReader([]byte(`{`)))
 	req.Header.Set("Content-Type", "application/json")
@@ -87,8 +89,8 @@ func TestHandler_Create_InvalidJSON_Returns400(t *testing.T) {
 func TestHandler_Create_MissingTargetURL_Returns400(t *testing.T) {
 	t.Parallel()
 
-	q := queue.NewMemoryQueue(10)
-	h := webhook.NewHandler(q)
+	st := store.NewMemory()
+	h := webhook.NewHandler(st)
 
 	body := map[string]any{
 		"event_type": "x",
@@ -113,8 +115,8 @@ func TestHandler_Create_MissingTargetURL_Returns400(t *testing.T) {
 func TestHandler_Create_InvalidTargetURL_Returns400(t *testing.T) {
 	t.Parallel()
 
-	q := queue.NewMemoryQueue(10)
-	h := webhook.NewHandler(q)
+	st := store.NewMemory()
+	h := webhook.NewHandler(st)
 
 	body := map[string]any{
 		"target_url": "not-a-valid-url",

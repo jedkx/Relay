@@ -8,22 +8,16 @@ import (
 	"net/http"
 	"net/url"
 
-	"relay/internal/queue"
+	"relay/internal/model"
+	"relay/internal/store"
 )
 
-type Event struct {
-	ID        string         `json:"id"`
-	TargetURL string         `json:"target_url"`
-	EventType string         `json:"event_type"`
-	Payload   map[string]any `json:"payload"`
-}
-
 type Handler struct {
-	q *queue.MemoryQueue
+	s store.Store
 }
 
-func NewHandler(q *queue.MemoryQueue) *Handler {
-	return &Handler{q: q}
+func NewHandler(s store.Store) *Handler {
+	return &Handler{s: s}
 }
 
 func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
@@ -49,15 +43,21 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid target_url", http.StatusBadRequest)
 		return
 	}
+	if in.Payload == nil {
+		in.Payload = map[string]any{}
+	}
 
-	ev := &Event{
+	ev := &model.Event{
 		ID:        newID(),
 		TargetURL: in.TargetURL,
 		EventType: in.EventType,
 		Payload:   in.Payload,
 	}
 
-	h.q.Enqueue(ev)
+	if err := h.s.InsertPending(r.Context(), ev); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusAccepted)
