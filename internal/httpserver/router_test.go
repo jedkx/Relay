@@ -10,15 +10,15 @@ import (
 	"testing"
 
 	"relay/internal/httpserver"
-	"relay/internal/queue"
+	"relay/internal/store"
 	"relay/internal/webhook"
 )
 
 func newTestRouter(t *testing.T) http.Handler {
 	t.Helper()
 
-	q := queue.NewMemoryQueue(10)
-	wh := webhook.NewHandler(q)
+	st := store.NewMemory()
+	wh := webhook.NewHandler(st)
 	return httpserver.NewRouter(wh)
 }
 

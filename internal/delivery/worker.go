@@ -2,6 +2,7 @@ package delivery
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,45 +10,73 @@ import (
 	"net/http"
 	"time"
 
-	"relay/internal/queue"
-	"relay/internal/webhook"
+	"relay/internal/model"
+	"relay/internal/store"
 )
 
-// Start runs a background worker that dequeues events and POSTs JSON to each event's TargetURL.
-// Failed deliveries: up to 3 attempts, 100ms between attempts, 10s per HTTP round trip.
-func Start(q *queue.MemoryQueue) {
-	go run(q)
+const (
+	idleWait   = 50 * time.Millisecond
+	errBackoff = time.Second
+	maxTries   = 3
+	httpTimeout = 10 * time.Second
+	retryPause  = 100 * time.Millisecond
+)
+
+func Start(ctx context.Context, s store.Store) {
+	go run(ctx, s)
 }
 
-func run(q *queue.MemoryQueue) {
+func run(ctx context.Context, s store.Store) {
 	for {
-		item := q.Dequeue()
-		ev, ok := item.(*webhook.Event)
-		if !ok {
-			log.Printf("relay: unexpected queue item type %T", item)
+		if ctx.Err() != nil {
+			return
+		}
+
+		ev, err := s.ClaimNext(ctx)
+		if err != nil {
+			if ctx.Err() == nil {
+				log.Printf("claim: %v", err)
+				time.Sleep(errBackoff)
+			}
 			continue
 		}
-		if err := deliver(ev); err != nil {
-			log.Printf("relay: delivery failed id=%s url=%s: %v", ev.ID, ev.TargetURL, err)
+		if ev == nil {
+			time.Sleep(idleWait)
+			continue
+		}
+
+		err = deliver(ctx, s, ev)
+		if err != nil {
+			if e := s.MarkFailed(ctx, ev.ID); e != nil {
+				log.Printf("mark failed %s: %v", ev.ID, e)
+			}
+			log.Printf("deliver id=%s url=%s: %v", ev.ID, ev.TargetURL, err)
+			continue
+		}
+		if e := s.MarkDelivered(ctx, ev.ID); e != nil {
+			log.Printf("mark delivered %s: %v", ev.ID, e)
 		}
 	}
 }
 
-func deliver(ev *webhook.Event) error {
-	out := map[string]any{
+func deliver(ctx context.Context, s store.Store, ev *model.Event) error {
+	body, err := json.Marshal(map[string]any{
 		"relay_event_id": ev.ID,
 		"event_type":     ev.EventType,
 		"payload":        ev.Payload,
-	}
-	raw, err := json.Marshal(out)
+	})
 	if err != nil {
 		return err
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{Timeout: httpTimeout}
 	var lastErr error
-	for attempt := 1; attempt <= 3; attempt++ {
-		req, err := http.NewRequest(http.MethodPost, ev.TargetURL, bytes.NewReader(raw))
+
+	for i := 1; i <= maxTries; i++ {
+		var status *int
+		var msg *string
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, ev.TargetURL, bytes.NewReader(body))
 		if err != nil {
 			return err
 		}
@@ -56,17 +85,27 @@ func deliver(ev *webhook.Event) error {
 		resp, err := client.Do(req)
 		if err != nil {
 			lastErr = err
-			time.Sleep(100 * time.Millisecond)
+			m := err.Error()
+			msg = &m
+			_ = s.RecordAttempt(ctx, ev.ID, i, status, msg)
+			time.Sleep(retryPause)
 			continue
 		}
 		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
+		resp.Body.Close()
 
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		code := resp.StatusCode
+		status = &code
+		if code < 200 || code >= 300 {
+			t := fmt.Sprintf("http %d", code)
+			msg = &t
+			lastErr = fmt.Errorf("http %d", code)
+		}
+		_ = s.RecordAttempt(ctx, ev.ID, i, status, msg)
+		if code >= 200 && code < 300 {
 			return nil
 		}
-		lastErr = fmt.Errorf("http %d", resp.StatusCode)
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(retryPause)
 	}
 	return lastErr
 }

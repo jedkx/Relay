@@ -11,15 +11,27 @@ import (
 
 	"relay/internal/delivery"
 	"relay/internal/httpserver"
-	"relay/internal/queue"
+	"relay/internal/store"
 	"relay/internal/webhook"
 )
 
 func main() {
-	q := queue.NewMemoryQueue(100)
-	delivery.Start(q)
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		log.Fatal("missing DATABASE_URL")
+	}
 
-	whHandler := webhook.NewHandler(q)
+	bg := context.Background()
+	db, err := store.OpenPostgres(bg, dsn)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	workerCtx, stopWorker := context.WithCancel(bg)
+	delivery.Start(workerCtx, db)
+
+	whHandler := webhook.NewHandler(db)
 	router := httpserver.NewRouter(whHandler)
 
 	srv := &http.Server{
@@ -40,10 +52,12 @@ func main() {
 	<-stop
 
 	log.Println("shutting down relay...")
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	stopWorker()
+
+	ctxShutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	if err := srv.Shutdown(ctx); err != nil {
+	if err := srv.Shutdown(ctxShutdown); err != nil {
 		log.Printf("shutdown error: %v", err)
 	}
 
