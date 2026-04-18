@@ -16,7 +16,7 @@ Outbound body shape:
 }
 ```
 
-Retries: 3 attempts, 100ms between failures, 10s HTTP timeout. Details in `internal/delivery/worker.go`.
+Outbound retries: up to **10** attempts, **exponential backoff** (1s base, 60s cap) **plus jitter** in `[0, 1s]` between tries, **10s** HTTP client timeout per try. See `internal/delivery/worker.go`.
 
 ## Layout
 

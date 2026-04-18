@@ -7,6 +7,7 @@ Where relay is headed. Not a release calendar—more a checklist so I don’t fo
 - **Postgres persistence** — `events` + `delivery_attempts`, schema applied when `relay` starts (`internal/store/migrations`).
 - **Claim path** — `FOR UPDATE SKIP LOCKED`, `pending` → `processing` → `delivered` / `failed`.
 - **Attempt rows** — each HTTP try recorded (status and/or error text).
+- **Outbound retries** — exponential backoff with jitter between attempts (10 tries max, 1s base, 60s cap); shutdown cancels waits without marking the event failed.
 - **Graceful stop** — worker context cancelled on shutdown (SIGTERM etc.); not a full drain story yet.
 
 The old **`internal/queue`** package is only for its own tests; production path is the store.
@@ -21,7 +22,7 @@ Rough priority:
 4. **Auth on ingest** — API key (or similar) + basic SSRF guardrails on `target_url`.
 5. **Read API** — `GET /events/:id` (+ attempts) before any UI fantasy.
 
-Retries are still fixed delay; exponential backoff + jitter belong after the reclaim/idempotency basics feel solid.
+Finer control (Retry-After header, per-destination presets) stays in Phase 2.
 
 ---
 
@@ -34,7 +35,7 @@ Goal: persistence, retries you can explain, enough trail that “what happened t
 | Durability | Postgres in place; restart keeps queue. Gaps: no versioned migrations, no stale-`processing` reclaim. |
 | Idempotency | Not started. |
 | Failure handling | Terminal `failed` + attempts table; no separate DLQ queue yet. |
-| Retries | Fixed count/sleep; backoff+jitter still TODO. |
+| Retries | Exponential backoff + jitter between HTTP tries (see worker). Still no Retry-After, no named presets. |
 | Audit trail | Attempt rows exist; could add request bytes, duration, correlation IDs. |
 | Lifecycle | Worker stops with process; in-flight HTTP may still run briefly—document / tighten if needed. |
 | Security | No ingest auth yet; URL validation is minimal. |
