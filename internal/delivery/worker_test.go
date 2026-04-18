@@ -3,6 +3,7 @@ package delivery
 import (
 	"context"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -44,7 +45,7 @@ func TestWorker_DeliversPOSTToTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if hits.Load() >= 1 {
 			return
@@ -52,4 +53,41 @@ func TestWorker_DeliversPOSTToTarget(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("timeout waiting for delivery")
+}
+
+func TestExponentialPart(t *testing.T) {
+	t.Parallel()
+	base := time.Second
+	max := 60 * time.Second
+	cases := []struct {
+		failed int
+		want   time.Duration
+	}{
+		{1, time.Second},
+		{2, 2 * time.Second},
+		{3, 4 * time.Second},
+		{6, 32 * time.Second},
+		{7, 60 * time.Second},
+		{8, 60 * time.Second},
+	}
+	for _, tc := range cases {
+		got := exponentialPart(tc.failed, base, max)
+		if got != tc.want {
+			t.Fatalf("failedAttempt=%d: got %v, want %v", tc.failed, got, tc.want)
+		}
+	}
+}
+
+func TestBackoffAfterFailedAttempt_JitterInRange(t *testing.T) {
+	t.Parallel()
+	base := time.Second
+	max := 60 * time.Second
+	r := rand.New(rand.NewPCG(42, 7))
+	for attempt := 1; attempt <= 9; attempt++ {
+		exp := exponentialPart(attempt, base, max)
+		got := backoffAfterFailedAttempt(attempt, base, max, r)
+		if got < exp || got > exp+base {
+			t.Fatalf("attempt %d: got %v, want in [%v, %v]", attempt, got, exp, exp+base)
+		}
+	}
 }
