@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"net/url"
 
@@ -47,8 +48,14 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		in.Payload = map[string]any{}
 	}
 
+	id, err := newID()
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
 	ev := &model.Event{
-		ID:        newID(),
+		ID:        id,
 		TargetURL: in.TargetURL,
 		EventType: in.EventType,
 		Payload:   in.Payload,
@@ -61,10 +68,29 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusAccepted)
-	_ = json.NewEncoder(w).Encode(map[string]string{
+	if err := json.NewEncoder(w).Encode(map[string]string{
 		"id":     ev.ID,
 		"status": "accepted",
-	})
+	}); err != nil {
+		log.Printf("encode response: %v", err)
+	}
+}
+
+func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	ev, err := h.s.GetEvent(r.Context(), id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if ev == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err := json.NewEncoder(w).Encode(ev); err != nil {
+		log.Printf("encode response: %v", err)
+	}
 }
 
 func validateTargetURL(raw string) error {
@@ -81,10 +107,10 @@ func validateTargetURL(raw string) error {
 	return nil
 }
 
-func newID() string {
+func newID() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		panic(err)
+		return "", err
 	}
-	return hex.EncodeToString(b[:])
+	return hex.EncodeToString(b[:]), nil
 }

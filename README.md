@@ -1,92 +1,122 @@
 # relay
 
-Small Go service: accept a webhook-shaped JSON, write it to **Postgres**, deliver it in the background with retries. Stack: Go 1.22, `net/http`, [pgx](https://github.com/jackc/pgx).
+## Why this exists
+
+When your service calls a webhook, the target URL might be down. The naive fix is retry logic inside the caller — but now every caller reimplements it differently, and none of them survive a process restart.
+
+Relay moves that responsibility out. The caller fires a single HTTP request and gets a 202 back immediately. Relay writes the event to Postgres and delivers it in the background, retrying up to 10 times with exponential backoff. If the process crashes mid-flight, stuck events are reclaimed on the next start.
+
+The caller doesn't need to know whether delivery succeeded. It can check later.
 
 ## What it does
 
-Callers get **202** quickly. The handler validates, inserts **`pending`** in `events`, returns `id` / `accepted`. A worker **claims** rows (`FOR UPDATE SKIP LOCKED`), POSTs JSON to `target_url`, logs each try in **`delivery_attempts`**, then marks **`delivered`** or **`failed`**.
-
-Outbound body shape:
-
-```json
-{
-  "relay_event_id": "<id>",
-  "event_type": "<string>",
-  "payload": { }
-}
+```
+Your service
+      │
+      │  POST /webhooks
+      │  {"target_url": "...", "event_type": "...", "payload": {...}}
+      ▼
+  Handler  →  Postgres (status: pending)  →  202 Accepted + id
+                    │
+                    ▼
+             Background worker
+             ├── claim row (FOR UPDATE SKIP LOCKED)
+             ├── POST payload to target_url
+             ├── record attempt (http_status or error)
+             └── mark delivered / retry with backoff / mark failed
 ```
 
-Outbound retries: up to **10** attempts, **exponential backoff** (1s base, 60s cap) **plus jitter** in `[0, 1s]` between tries, **10s** HTTP client timeout per try. See `internal/delivery/worker.go`.
+On startup, any event stuck in `processing` for more than 5 minutes (e.g. from a previous crash) is moved back to `pending` automatically.
 
-## Layout
+## This is a core
 
-| Path | Role |
-|------|------|
-| `cmd/relay` | HTTP API + worker (needs `DATABASE_URL`) |
-| `cmd/relay-mock` | Tiny receiver for local smoke tests |
-| `internal/webhook` | `POST /webhooks` |
-| `internal/httpserver` | Routes (`GET /health`, …) |
-| `internal/store` | Postgres + in-memory `Store` for tests |
-| `internal/model` | Shared `Event` struct |
-| `internal/delivery` | Claim loop + HTTP delivery |
-| `docs/ROADMAP.md` | What’s done vs what’s next |
+No auth, no idempotency, no circuit breaker, no metrics. Those are your responsibility:
 
-## Config
+- **Auth on ingest** — `POST /webhooks` is open. Add your own middleware or reverse proxy in front of it.
+- **Deduplication** — if your caller retries the POST, two events are created. Handle dedup at the caller or add it here.
+- **Single node** — one worker goroutine, one process. No distributed locking across replicas.
 
-- **`DATABASE_URL`** — required for `cmd/relay` (see `docker-compose.yml` or `.env.example`).
-- Ports and retry tuning are still hard-coded.
+The extension points are the `Store` interface (`internal/store/store.go`) and the `delivery` package — both are straightforward to replace or wrap.
 
-## Docker (easiest)
+## Run
 
 ```bash
 docker compose up --build
 ```
 
-- Relay: `http://127.0.0.1:8080` — `GET /health`, `POST /webhooks`
-- Mock: `http://127.0.0.1:8081` — `POST /receive` (logs body)
-- Postgres: `127.0.0.1:5432`, db `relay_dev`, user/password `relay` / `relay` (dev only)
+- Relay: `http://127.0.0.1:8080`
+- Postgres: `127.0.0.1:5433`, db `relay_dev`, user/password `relay` / `relay`
 
-**Schema:** applied when **relay** connects (`internal/store/migrations`), not when Postgres starts alone.
+Schema is applied when relay connects, not when Postgres starts.
 
-**`target_url` from relay’s container:** use `http://relay-mock:8081/receive`, not `127.0.0.1`, so delivery can reach the mock. From the host (curl, Postman, etc.) you still call relay at `127.0.0.1:8080`.
+## Configuration
 
-Example:
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `DATABASE_URL` | yes | Postgres DSN |
+
+Everything else is hard-coded in `internal/delivery/worker.go`:
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `maxTries` | 10 | Max delivery attempts per event |
+| `backoffBase` | 1s | Base for exponential backoff |
+| `backoffMax` | 60s | Backoff cap |
+| `httpTimeout` | 10s | Per-attempt HTTP timeout |
+| `stuckFor` | 5m | Threshold to reclaim stuck events on startup |
+
+## API
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/health` | Returns `200 ok` |
+| `POST` | `/webhooks` | Enqueue a webhook for delivery |
+| `GET` | `/events/{id}` | Get event status + delivery attempts |
+
+### POST /webhooks
 
 ```bash
-curl -s http://127.0.0.1:8080/health
 curl -s -X POST http://127.0.0.1:8080/webhooks \
   -H "Content-Type: application/json" \
-  -d '{"target_url":"http://relay-mock:8081/receive","event_type":"demo","payload":{"k":1}}'
+  -d '{"target_url":"https://example.com/hook","event_type":"order.created","payload":{"id":42}}'
 ```
 
-Wipe data: `docker compose down -v`.
+Response `202 Accepted`:
 
-## Without Docker
+```json
+{ "id": "a3f8c1d2...", "status": "accepted" }
+```
 
-Postgres running locally, then:
+### GET /events/{id}
 
 ```bash
-go run ./cmd/relay-mock
-export DATABASE_URL=postgres://relay:relay@127.0.0.1:5432/relay_dev?sslmode=disable   # Unix
-go run ./cmd/relay
+curl http://127.0.0.1:8080/events/a3f8c1d2...
 ```
 
-Windows (cmd): `set DATABASE_URL=postgres://relay:relay@127.0.0.1:5432/relay_dev?sslmode=disable`
+Response `200 OK`:
 
-Use `http://127.0.0.1:8081/receive` in `target_url` when mock runs on the host.
+```json
+{
+  "id": "a3f8c1d2...",
+  "target_url": "https://example.com/hook",
+  "event_type": "order.created",
+  "status": "failed",
+  "created_at": "2026-05-16T10:00:00Z",
+  "attempts": [
+    { "attempt_no": 1, "http_status": 500, "error": "http 500", "attempted_at": "..." },
+    { "attempt_no": 2, "http_status": null, "error": "connection refused", "attempted_at": "..." }
+  ]
+}
+```
+
+`status` is one of: `pending`, `processing`, `delivered`, `failed`.
 
 ## Tests
 
 ```bash
-go test ./... -count=1
+docker compose --profile test run --rm test
 ```
 
-Or no local Go: `docker compose --profile test run --rm test`
+## License
 
-## CI
-
-`.github/workflows/ci.yml` — `go vet`, `go test`, `go build` on push/PR to `main` / `master`.
-
-## Roadmap / license
-
-See **`docs/ROADMAP.md`**. Errors and docs in this repo are English. **MIT** — `LICENSE`.
+MIT — `LICENSE`.

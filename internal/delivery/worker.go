@@ -128,7 +128,9 @@ func deliver(ctx context.Context, s store.Store, ev *model.Event) error {
 			lastErr = err
 			m := err.Error()
 			msg = &m
-			_ = s.RecordAttempt(ctx, ev.ID, i, status, msg)
+			if e := s.RecordAttempt(ctx, ev.ID, i, status, msg); e != nil {
+				log.Printf("record attempt id=%s attempt=%d: %v", ev.ID, i, e)
+			}
 			if i < maxTries {
 				wait := backoffAfterFailedAttempt(i, backoffBase, backoffMax, rng)
 				if err := sleepCtx(ctx, wait); err != nil {
@@ -147,7 +149,9 @@ func deliver(ctx context.Context, s store.Store, ev *model.Event) error {
 			msg = &t
 			lastErr = fmt.Errorf("http %d", code)
 		}
-		_ = s.RecordAttempt(ctx, ev.ID, i, status, msg)
+		if e := s.RecordAttempt(ctx, ev.ID, i, status, msg); e != nil {
+			log.Printf("record attempt id=%s attempt=%d: %v", ev.ID, i, e)
+		}
 		if code >= 200 && code < 300 {
 			return nil
 		}

@@ -1,4 +1,3 @@
-# App: one image, two binaries. Postgres for local dev / DBeaver. Tests: golang image (profile `test`).
 services:
   relay:
     build:
@@ -13,14 +12,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    command: ["/app/relay"]
-
-  relay-mock:
-    image: relay:latest
-    container_name: relay-mock
-    ports:
-      - "8081:8081"
-    command: ["/app/relay-mock"]
+    restart: unless-stopped
 
   postgres:
     image: postgres:16-alpine
@@ -30,7 +22,7 @@ services:
       POSTGRES_PASSWORD: relay
       POSTGRES_DB: relay_dev
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - relay_pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -38,6 +30,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
   test:
     image: golang:1.22-alpine

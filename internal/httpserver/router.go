@@ -17,6 +17,7 @@ func NewRouter(h *webhook.Handler) http.Handler {
 	})
 
 	mux.HandleFunc("POST /webhooks", h.Create)
+	mux.HandleFunc("GET /events/{id}", h.Get)
 
 	return mux
 }

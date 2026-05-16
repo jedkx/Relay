@@ -28,6 +28,13 @@ func main() {
 	}
 	defer db.Close()
 
+	n, err := db.ReclaimStuck(bg, 5*time.Minute)
+	if err != nil {
+		log.Printf("reclaim stuck: %v", err)
+	} else if n > 0 {
+		log.Printf("reclaimed %d stuck event(s)", n)
+	}
+
 	workerCtx, stopWorker := context.WithCancel(bg)
 	delivery.Start(workerCtx, db)
 

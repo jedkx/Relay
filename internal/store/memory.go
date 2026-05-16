@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"sync"
+	"time"
 
 	"relay/internal/model"
 )
@@ -77,6 +78,26 @@ func (m *Memory) MarkFailed(_ context.Context, id string) error {
 
 func (m *Memory) RecordAttempt(_ context.Context, _ string, _ int, _ *int, _ *string) error {
 	return nil
+}
+
+func (m *Memory) ReclaimStuck(_ context.Context, _ time.Duration) (int64, error) {
+	return 0, nil
+}
+
+func (m *Memory) GetEvent(_ context.Context, id string) (*model.EventDetail, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r, ok := m.byID[id]
+	if !ok {
+		return nil, nil
+	}
+	return &model.EventDetail{
+		ID:        r.ev.ID,
+		TargetURL: r.ev.TargetURL,
+		EventType: r.ev.EventType,
+		Status:    r.status,
+		Attempts:  []model.Attempt{},
+	}, nil
 }
 
 func (m *Memory) Get(id string) (*model.Event, string, bool) {

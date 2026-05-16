@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -104,6 +105,53 @@ func (p *Postgres) MarkDelivered(ctx context.Context, id string) error {
 func (p *Postgres) MarkFailed(ctx context.Context, id string) error {
 	_, err := p.pool.Exec(ctx, `UPDATE events SET status = 'failed', updated_at = now() WHERE id = $1`, id)
 	return err
+}
+
+func (p *Postgres) GetEvent(ctx context.Context, id string) (*model.EventDetail, error) {
+	var ev model.EventDetail
+	err := p.pool.QueryRow(ctx, `
+		SELECT id, target_url, event_type, status, created_at
+		FROM events WHERE id = $1
+	`, id).Scan(&ev.ID, &ev.TargetURL, &ev.EventType, &ev.Status, &ev.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := p.pool.Query(ctx, `
+		SELECT attempt_no, http_status, error_text, created_at
+		FROM delivery_attempts WHERE event_id = $1
+		ORDER BY attempt_no ASC
+	`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	ev.Attempts = []model.Attempt{}
+	for rows.Next() {
+		var a model.Attempt
+		if err := rows.Scan(&a.AttemptNo, &a.HTTPStatus, &a.Error, &a.AttemptedAt); err != nil {
+			return nil, err
+		}
+		ev.Attempts = append(ev.Attempts, a)
+	}
+	return &ev, rows.Err()
+}
+
+func (p *Postgres) ReclaimStuck(ctx context.Context, stuckFor time.Duration) (int64, error) {
+	tag, err := p.pool.Exec(ctx, `
+		UPDATE events
+		SET status = 'pending', updated_at = now()
+		WHERE status = 'processing'
+		  AND updated_at < now() - make_interval(secs => $1)
+	`, stuckFor.Seconds())
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
 }
 
 func (p *Postgres) RecordAttempt(ctx context.Context, eventID string, n int, status *int, msg *string) error {
